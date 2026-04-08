@@ -39,6 +39,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.config.msys_sys }}
+          update: true
           install: mingw-w64-${{ matrix.config.msys_env }} make git zip
 
       - name: Download SDE package
