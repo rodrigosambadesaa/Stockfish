@@ -10,13 +10,22 @@ trap 'error ${LINENO}' ERR
 
 echo "reprosearch testing started"
 
+if [ -x ./stockfish ]; then
+  ENGINE=./stockfish
+elif [ -x ./stockfish.exe ]; then
+  ENGINE=./stockfish.exe
+else
+  echo "Stockfish binary not found in src/. Build it first."
+  exit 1
+fi
+
 # repeat two short games, separated by ucinewgame.
 # with go nodes $nodes they should result in exactly
 # the same node count for each iteration.
 cat << EOF > repeat.exp
  set timeout 10
- spawn ./stockfish
- lassign \$argv nodes
+ lassign \$argv engine nodes
+ spawn \$engine
 
  send "uci\n"
  expect "uciok"
@@ -52,7 +61,7 @@ do
   echo "reprosearch testing with $nodes nodes"
 
   # each line should appear exactly an even number of times
-  expect repeat.exp $nodes 2>&1 | grep -o "nodes [0-9]*" | sort | uniq -c | awk '{if ($1%2!=0) exit(1)}'
+  expect repeat.exp $ENGINE $nodes 2>&1 | grep -o "nodes [0-9]*" | sort | uniq -c | awk '{if ($1%2!=0) exit(1)}'
 
 done
 

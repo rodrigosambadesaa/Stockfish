@@ -196,9 +196,13 @@ class TestCLI(metaclass=OrderedClassMembers):
             )
             assert False
 
-        diff = subprocess.run(["diff", network, f"verify.nnue"])
+        with open(network, "rb") as base_net:
+            base_data = base_net.read()
 
-        assert diff.returncode == 0
+        with open("verify.nnue", "rb") as verify_net:
+            verify_data = verify_net.read()
+
+        assert base_data == verify_data
 
 
 class TestInteractive(metaclass=OrderedClassMembers):

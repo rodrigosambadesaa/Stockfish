@@ -17,8 +17,17 @@ error()
 }
 trap 'error ${LINENO}' ERR
 
+if [ -x ./stockfish ]; then
+   ENGINE=./stockfish
+elif [ -x ./stockfish.exe ]; then
+   ENGINE=./stockfish.exe
+else
+   echo "Stockfish binary not found in src/. Build it first."
+   exit 1
+fi
+
 # obtain
-eval "$RUN_PREFIX ./stockfish bench" > "$STDOUT_FILE" 2> "$STDERR_FILE" || error ${LINENO}
+eval "$RUN_PREFIX $ENGINE bench" > "$STDOUT_FILE" 2> "$STDERR_FILE" || error ${LINENO}
 signature=$(grep "Nodes searched  : " "$STDERR_FILE" | awk '{print $4}')
 
 rm -f "$STDOUT_FILE" "$STDERR_FILE"
