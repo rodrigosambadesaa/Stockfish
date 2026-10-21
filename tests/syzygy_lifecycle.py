@@ -14,8 +14,8 @@ import tempfile
 
 
 FOUND = re.compile(
-    r"(?m)^info string Found (\\d+) WDL and (\\d+) DTZ "
-    r"tablebase files \\(up to (\\d+)-man\\)\\.\\s*$"
+    r"(?m)^info string Found (\d+) WDL and (\d+) DTZ "
+    r"tablebase files \(up to (\d+)-man\)\.\s*$"
 )
 
 
@@ -51,7 +51,7 @@ def main() -> int:
         try:
             result = subprocess.run(
                 [str(engine)],
-                input="\\n".join(commands) + "\\n",
+                input="\n".join(commands) + "\n",
                 capture_output=True,
                 text=True,
                 timeout=90,
@@ -68,8 +68,8 @@ def main() -> int:
             print("Syzygy reset regression FAILED", file=sys.stderr)
             print(f"Expected tablebase discoveries: {expected}", file=sys.stderr)
             print(f"Actual tablebase discoveries:   {found}", file=sys.stderr)
-            print("STDOUT:\\n" + result.stdout, file=sys.stderr)
-            print("STDERR:\\n" + result.stderr, file=sys.stderr)
+            print("STDOUT:\n" + result.stdout, file=sys.stderr)
+            print("STDERR:\n" + result.stderr, file=sys.stderr)
             return 1
 
     print("Syzygy lifecycle OK: new game / Clear Hash / path changes reinitialize tables")
