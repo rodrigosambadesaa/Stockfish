@@ -1,0 +1,25 @@
+name: Syzygy lifecycle regression
+
+on:
+  push:
+    branches:
+      - pr/syzygy-search-clear-no-reinit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syzygy-lifecycle:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download required NNUE networks
+        run: make -C src net
+      - name: Build Stockfish
+        run: make -C src -j2 build ARCH=x86-64
+      - name: Test Syzygy cleanup and reinitialization
+        run: python3 tests/syzygy_lifecycle.py src/stockfish
