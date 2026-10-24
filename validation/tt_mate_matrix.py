@@ -82,9 +82,8 @@ def run_engine(path, configs):
         for key, fen, hsh, threads, mpv, nodes in configs:
             board = chess.Board(fen)
             eng.configure({"Hash": hsh, "Threads": threads})
-            eng.configure({"MultiPV": min(mpv, board.legal_moves.count())})
-            # New game resets TT / histories, keeping runs comparable.
-            eng.protocol._ucinewgame = None
+            # python-chess manages MultiPV itself through analyse().
+            # A distinct game token resets TT/histories between scenarios.
             result = eng.analyse(board, chess.engine.Limit(nodes=nodes),
                                  multipv=min(mpv, board.legal_moves.count()),
                                  game=object(), info=chess.engine.INFO_ALL)
