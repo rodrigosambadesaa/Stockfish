@@ -1,0 +1,47 @@
+name: Reproduce historical TT mate bug before Fishtest
+on:
+  push:
+    branches: [validation/qsearch-historical-bug-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  retrospective:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: verification
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: 400c23f978897b34d4a5ed5c4c6c6f858d40f976
+          path: historical-base
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: 400c23f978897b34d4a5ed5c4c6c6f858d40f976
+          path: historical-candidate
+          persist-credentials: false
+      - name: Install chess protocol bindings
+        run: python3 -m pip install --user python-chess==1.999
+      - name: Apply same experimental qsearch bound logic to historical revision
+        run: python3 verification/validation/historical_mate.py --apply
+      - name: Build baseline and patched historical engines
+        run: |
+          make -C historical-base/src net
+          make -C historical-candidate/src net
+          make -C historical-base/src -j2 build ARCH=x86-64
+          make -C historical-candidate/src -j2 build ARCH=x86-64
+      - name: Independently reproduce issue 7221
+        run: python3 verification/validation/historical_mate.py
+      - name: Archive reproduction
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: historical-mate-study
+          path: historical-bug-study.json
+          if-no-files-found: ignore
