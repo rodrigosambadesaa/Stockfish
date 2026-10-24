@@ -1,0 +1,35 @@
+name: Qsearch relative bench cost
+on:
+  push:
+    branches: [validation/qsearch-bench-cost-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bench:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: effdc3fd3f6de6e75fe1374a51a7a7eed66f880b
+          path: baseline
+          persist-credentials: false
+      - name: Build baseline and patch using same compiler and networks
+        run: |
+          make -C baseline/src net
+          make -C candidate/src net
+          make -C baseline/src -j2 build ARCH=x86-64
+          make -C candidate/src -j2 build ARCH=x86-64
+      - name: Measure warm and interleaved bench runs
+        run: python3 candidate/validation/bench_cost.py
+      - name: Upload comparative report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qsearch-bench-cost
+          path: qsearch-bench-cost.json
