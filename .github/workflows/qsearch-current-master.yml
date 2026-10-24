@@ -1,0 +1,62 @@
+name: Verify conservative qsearch guard on latest upstream master
+on:
+  push:
+    branches: [validation/qsearch-upper-current-master-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install expect
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: NNUE networks
+        run: make -C src net
+      - name: Build and bench
+        run: |
+          make -C src -j2 build ARCH=x86-64 COMP=${{ matrix.compiler }}
+          cd src
+          bash ../tests/signature.sh
+      - name: Verify Stockfish perft and deterministic search
+        working-directory: src
+        run: |
+          bash ../tests/perft.sh
+          bash ../tests/reprosearch.sh
+
+  relative-bench:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: dbe600b7438662e9ade60b31fa0625259dcd0077
+          path: baseline
+          persist-credentials: false
+      - name: Build both
+        run: |
+          make -C candidate/src net
+          make -C baseline/src net
+          make -C candidate/src -j2 build ARCH=x86-64
+          make -C baseline/src -j2 build ARCH=x86-64
+      - name: Compare interleaved benchmarks
+        run: python3 candidate/validation/bench_cost.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: current-master-bench
+          path: qsearch-bench-cost.json
+          if-no-files-found: ignore
