@@ -1,0 +1,47 @@
+name: Validate exact selective guard against historical false mate
+on:
+  push:
+    branches: [validation/qsearch-upper-historical-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  historical:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: 400c23f978897b34d4a5ed5c4c6c6f858d40f976
+          path: historical
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: 400c23f978897b34d4a5ed5c4c6c6f858d40f976
+          path: historical-patched
+          persist-credentials: false
+      - name: Install python chess
+        run: python3 -m pip install --user python-chess==1.999
+      - name: Backport exact branch implementation
+        run: python3 candidate/validation/upper_historical.py --patch
+      - name: Build historical stock and patched
+        run: |
+          make -C historical/src net
+          make -C historical-patched/src net
+          make -C historical/src -j2 build ARCH=x86-64
+          make -C historical-patched/src -j2 build ARCH=x86-64
+      - name: Verify reproduced mate claim no longer emitted
+        run: python3 candidate/validation/upper_historical.py
+      - name: Archive evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: upper-historical
+          path: upper-historical.json
+          if-no-files-found: ignore
