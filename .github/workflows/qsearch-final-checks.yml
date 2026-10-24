@@ -1,0 +1,45 @@
+name: Final qsearch safety and bench
+
+on:
+  push:
+    branches:
+      - validation/qsearch-final-checks-2026
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {name: gcc-release, comp: gcc, debug: no, sanitize: none}
+          - {name: clang-release, comp: clang, debug: no, sanitize: none}
+          - {name: gcc-asan-ubsan, comp: gcc, debug: yes, sanitize: "address undefined"}
+    name: "${{ matrix.config.name }}"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install expect
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: Fetch NNUE nets
+        run: make -C src net
+      - name: Build
+        run: make -C src -j2 build ARCH=x86-64 COMP=${{ matrix.config.comp }} debug=${{ matrix.config.debug }} sanitize="${{ matrix.config.sanitize }}" 
+      - name: Bench signature
+        working-directory: src
+        run: bash ../tests/signature.sh
+      - name: Verify search reproducibility
+        if: matrix.config.name != 'gcc-asan-ubsan'
+        working-directory: src
+        run: bash ../tests/reprosearch.sh
+      - name: Sanitizer smoke search
+        if: matrix.config.name == 'gcc-asan-ubsan'
+        working-directory: src
+        run: |
+          printf 'uci\nposition startpos\ngo depth 6\nquit\n' | ./stockfish
