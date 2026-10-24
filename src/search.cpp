@@ -1739,19 +1739,17 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     pvHit        = ttHit && ttData.is_pv;
 
     // At non-PV nodes we check for an early TT cutoff.
-    // A decisive TT value may be contaminated by a collision. Limit its
-    // influence without strengthening the recorded lower or upper bound.
-    if (!PvNode && ttData.depth >= DEPTH_QS && is_valid(ttData.value))
+    // A decisive upper bound may come from a TT collision. Weaken it before
+    // returning, but only if the weakened score still stays below beta.
+    if (!PvNode && ttData.depth >= DEPTH_QS && is_valid(ttData.value)
+        && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER)))
     {
+        if (!is_decisive(ttData.value) || ttData.value >= beta)
+            return ttData.value;
+
         const Value boundedValue =
           std::clamp(ttData.value, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
-
-        // Clamping downward preserves a lower bound; clamping upward preserves
-        // an upper bound. Never use a weakened bound that no longer cuts off.
-        if (((ttData.bound & BOUND_LOWER) && boundedValue >= beta
-             && boundedValue <= ttData.value)
-            || ((ttData.bound & BOUND_UPPER) && boundedValue < beta
-                && boundedValue >= ttData.value))
+        if (boundedValue < beta)
             return boundedValue;
     }
 

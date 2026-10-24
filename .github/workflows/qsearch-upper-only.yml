@@ -1,0 +1,87 @@
+name: Upper bound TT guard regression and performance
+
+on:
+  push:
+    branches: [validation/qsearch-upper-only-2026]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install expect
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: Download networks
+        run: make -C src net
+      - name: Build compiler-specific Stockfish
+        run: make -C src -j2 build ARCH=x86-64 COMP=${{ matrix.compiler }}
+      - name: Bench signature
+        working-directory: src
+        run: bash ../tests/signature.sh
+      - name: Full perft suite
+        working-directory: src
+        run: bash ../tests/perft.sh
+      - name: Reproducible search suite
+        working-directory: src
+        run: bash ../tests/reprosearch.sh
+
+  comparative:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [small, large, diverse, bench, games10k, games50k]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: effdc3fd3f6de6e75fe1374a51a7a7eed66f880b
+          path: baseline
+          persist-credentials: false
+      - name: Install python-chess
+        if: matrix.suite != 'bench'
+        run: python3 -m pip install --user python-chess==1.999
+      - name: Build baseline and candidate with same compiler
+        run: |
+          make -C baseline/src net
+          make -C candidate/src net
+          make -C baseline/src -j2 build ARCH=x86-64
+          make -C candidate/src -j2 build ARCH=x86-64
+      - name: Scenario matrix
+        if: matrix.suite == 'small' || matrix.suite == 'large' || matrix.suite == 'diverse'
+        run: python3 candidate/validation/tt_mate_matrix.py baseline/src/stockfish candidate/src/stockfish --suite "${{ matrix.suite }}"
+      - name: Interleaved performance measurements
+        if: matrix.suite == 'bench'
+        run: python3 candidate/validation/bench_cost.py
+      - name: Paired games 10000 nodes
+        if: matrix.suite == 'games10k'
+        run: python3 candidate/validation/paired_screen.py --nodes 10000
+      - name: Paired games 50000 nodes
+        if: matrix.suite == 'games50k'
+        run: python3 candidate/validation/paired_screen.py --nodes 50000
+      - name: Upload detailed results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: guard-upper-${{ matrix.suite }}
+          path: |
+            mate-matrix-*.json
+            paired-screen-*.json
+            qsearch-bench-cost.json
+          if-no-files-found: ignore
