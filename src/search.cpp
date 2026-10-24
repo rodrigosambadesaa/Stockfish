@@ -1738,10 +1738,13 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     ttData.value = ttHit ? value_from_tt(ttData.value, ss->ply, pos.rule50_count()) : VALUE_NONE;
     pvHit        = ttHit && ttData.is_pv;
 
-    // At non-PV nodes we check for an early TT cutoff
+    // At non-PV nodes we check for an early TT cutoff.
+    // Do not promote a potentially colliding TT entry to a proven mate score
+    // without searching the line; keep only the non-decisive bound.
     if (!PvNode && ttData.depth >= DEPTH_QS && is_valid(ttData.value)
         && (ttData.bound & (ttData.value >= beta ? BOUND_LOWER : BOUND_UPPER)))
-        return ttData.value;
+        return std::clamp(ttData.value, VALUE_TB_LOSS_IN_MAX_PLY + 1,
+                          VALUE_TB_WIN_IN_MAX_PLY - 1);
 
     // Step 4. Static evaluation of the position
     Value unadjustedStaticEval = VALUE_NONE;

@@ -1,0 +1,68 @@
+name: Experimental qsearch TT mate guard
+
+on:
+  push:
+    branches:
+      - experiment/qsearch-tt-mate-guard-2026
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: Download official NNUE networks
+        run: make -C src net
+      - name: Build engine (${{ matrix.compiler }})
+        run: make -C src -j2 build ARCH=x86-64 COMP=${{ matrix.compiler }}
+      - name: Bench signature
+        working-directory: src
+        run: bash ../tests/signature.sh
+      - name: Perft correctness
+        working-directory: src
+        run: bash ../tests/perft.sh
+      - name: Reproducible search
+        working-directory: src
+        run: bash ../tests/reprosearch.sh
+      - name: MultiPV false mate reproduction
+        working-directory: src
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          commands = [
+              "uci",
+              "setoption name Threads value 1",
+              "setoption name Hash value 16",
+              "setoption name MultiPV value 256",
+              "position fen 8/1pNKp3/1B2P3/1P6/1pNP4/1k6/1P6/1B6 w - - 0 1",
+              "go nodes 8000000",
+              "ucinewgame",
+              "quit",
+          ]
+          proc = subprocess.run(["./stockfish"], input="\n".join(commands)+"\n",
+                                text=True, capture_output=True, timeout=240)
+          print("Engine exit:", proc.returncode)
+          if proc.returncode:
+              print(proc.stdout[-6000:])
+              print(proc.stderr[-4000:])
+              raise SystemExit(proc.returncode)
+          lines = [x for x in proc.stdout.splitlines() if " pv c7a8" in x]
+          print("MultiPV lines beginning c7a8:", len(lines))
+          for x in lines[-5:]:
+              print(x[:350])
+          if not any(x.startswith("bestmove ") for x in proc.stdout.splitlines()):
+              raise SystemExit("No bestmove emitted")
+          PY
