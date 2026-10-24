@@ -1749,6 +1749,11 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
 
         const Value boundedValue =
           std::clamp(ttData.value, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
+
+        // An upper bound must never become stronger. In particular, clamping
+        // a positive decisive score downward would violate that property.
+        if (boundedValue < ttData.value)
+            return ttData.value;
         if (boundedValue < beta)
             return boundedValue;
     }
