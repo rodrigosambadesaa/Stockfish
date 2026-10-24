@@ -1,0 +1,53 @@
+name: Search decisive TT guard policy sweep
+on:
+  push:
+    branches: [validation/qsearch-selective-guards-2026]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  variants:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        policy: [full, shallow8, shallow16, deep8, pvhit, nonpvhit, lower, upper]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: effdc3fd3f6de6e75fe1374a51a7a7eed66f880b
+          path: current
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: official-stockfish/Stockfish
+          ref: 400c23f978897b34d4a5ed5c4c6c6f858d40f976
+          path: historical
+          persist-credentials: false
+      - name: Install chess engine API
+        run: python3 -m pip install --user python-chess==1.999
+      - name: Apply same policy in current and historical versions
+        run: |
+          python3 tooling/validation/selective_guards.py current/src/search.cpp ${{ matrix.policy }}
+          python3 tooling/validation/selective_guards.py historical/src/search.cpp ${{ matrix.policy }}
+      - name: Build two engines using official networks
+        run: |
+          make -C current/src net
+          make -C historical/src net
+          make -C current/src -j2 build ARCH=x86-64
+          make -C historical/src -j2 build ARCH=x86-64
+      - name: Time bench and reproduce false mate
+        run: python3 tooling/validation/selective_measure.py
+      - name: Upload independent measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: selective-policy-${{ matrix.policy }}
+          path: selective-result.json
+          if-no-files-found: ignore
