@@ -251,8 +251,11 @@ ExtMove* MovePicker::generate_and_score() {
             if (lph)
                 value += 8 * (*lph)[m.raw()] / (1 + ply);
 
-            // bonus for checks
-            if ((pos.check_squares(pt) & to) && pos.see_ge(m, -75))
+            // Bonus for direct and discovered checks, provided the move is not a bad trade.
+            // Most moves cannot uncover a slider check, so avoid a full check test for them.
+            if (((pos.check_squares(pt) & to)
+                 || ((pos.blockers_for_king(~us) & from) && pos.gives_check(m)))
+                && pos.see_ge(m, -75))
                 value += 16384;
 
             m.value = value;
