@@ -1,0 +1,57 @@
+name: Experimental Stockfish preflight
+
+on:
+  push:
+    branches:
+      - experiment/quiet-discovered-checks-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight (${{ matrix.name }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC
+            compiler: g++
+            comp: gcc
+          - name: Clang
+            compiler: clang++
+            comp: clang
+    env:
+      COMPCXX: ${{ matrix.compiler }}
+      COMP: ${{ matrix.comp }}
+      CXXFLAGS: -Werror
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install search test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y expect
+        working-directory: .
+      - name: Fetch the default NNUE network
+        run: make net
+      - name: Compile generic x86-64 engine with warnings as errors
+        run: make -j2 ARCH=x86-64 build
+      - name: Obtain bench signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          signature="$(../tests/signature.sh)"
+          echo "Bench: $signature"
+          echo "### ${{ matrix.name }} — Bench: $signature" >> "$GITHUB_STEP_SUMMARY"
+          test "$signature" -gt 0
+      - name: Reproducible search across new games
+        run: ../tests/reprosearch.sh
+      - name: Legal move generation regression
+        if: matrix.comp == 'gcc'
+        run: ../tests/perft.sh
