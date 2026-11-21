@@ -1,0 +1,124 @@
+name: Cached pawn attack map - search-equivalent benchmark
+
+on:
+  push:
+    branches:
+      - experiment/pawn-threat-escape-lmr-cached-mask-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: AVX2 ${{ matrix.compiler }} / bonus ${{ matrix.bonus }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        bonus: [512, 1024]
+    env:
+      COMP: ${{ matrix.compiler }}
+      COMPCXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+      BONUS: ${{ matrix.bonus }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check AVX2 support
+        run: grep -qw avx2 /proc/cpuinfo
+      - name: Check out pinned uncached and Stockfish master
+        run: |
+          git worktree add --detach ../pawn-escape-uncached 6d67e8e7c470999f426ae9e21ab8c8f59151576a
+          git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Fetch neural nets
+        run: |
+          make -C src net
+          make -C ../pawn-escape-uncached/src net
+          make -C ../stockfish-reference/src net
+      - name: Build matched AVX2 engines
+        run: |
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C ../pawn-escape-uncached/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C src -j2 ARCH=x86-64-avx2 build
+      - name: Ensure identical search behavior between cached and uncached
+        shell: bash
+        run: |
+          set -euo pipefail
+          orig="$(cd ../pawn-escape-uncached/src && ../tests/signature.sh)"
+          new="$(cd src && ../tests/signature.sh)"
+          base="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          echo "bench signatures official=$base uncached=$orig cached=$new"
+          [[ "$orig" == "$new" ]] || {
+            echo "::error::Pawn-threat caching altered the search tree"
+            exit 1
+          }
+      - name: Nine interleaved CPU performance samples
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import resource
+          import statistics
+          import subprocess
+          import time
+          root = pathlib.Path.cwd()
+          dirs = {
+            "official": (root / "../stockfish-reference/src").resolve(),
+            "uncached": (root / "../pawn-escape-uncached/src").resolve(),
+            "cached": (root / "src").resolve()
+          }
+          data = {k:[] for k in dirs}
+          for i in range(9):
+              names=list(dirs)
+              names=names[i%3:]+names[:i%3]
+              if i%2: names.reverse()
+              for name in names:
+                  before=resource.getrusage(resource.RUSAGE_CHILDREN)
+                  wall_start=time.perf_counter()
+                  p=subprocess.run(["./stockfish","bench"],cwd=dirs[name],
+                                   capture_output=True,text=True,check=True,timeout=180)
+                  wall=time.perf_counter()-wall_start
+                  after=resource.getrusage(resource.RUSAGE_CHILDREN)
+                  s=p.stderr+"\n"+p.stdout
+                  nps=re.search(r"Nodes/second\s*:\s*(\d+)",s)
+                  nodes=re.search(r"Nodes searched\s*:\s*(\d+)",s)
+                  if not nps or not nodes: raise RuntimeError("Cannot parse bench output")
+                  row={"nps":int(nps.group(1)),"nodes":int(nodes.group(1)),
+                       "cpu":after.ru_utime+after.ru_stime-before.ru_utime-before.ru_stime,
+                       "wall":wall}
+                  data[name].append(row)
+                  print(f"round={i+1} {name} {row}",flush=True)
+          if len({row["nodes"] for k in ("uncached","cached") for row in data[k]})!=1:
+              raise AssertionError("Search trees differ")
+          med={k:{m:statistics.median(x[m] for x in v)
+                  for m in ("nps","nodes","cpu","wall")} for k,v in data.items()}
+          delta={k:100*(med[k]["cpu"]/med["uncached"]["cpu"]-1) for k in dirs}
+          out={"compiler":os.environ["COMP"],"bonus":int(os.environ["BONUS"]),
+               "medians":med,"cpu_vs_uncached_pct":delta,"samples":data}
+          print("CACHE_RESULT="+json.dumps(out,sort_keys=True),flush=True)
+          pathlib.Path("cached-pawn-bench.json").write_text(json.dumps(out,indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("| Engine | Nodes | Median CPU seconds | CPU vs uncached | Median NPS |\n"
+                      "|---|---:|---:|---:|---:|\n")
+              for k in dirs:
+                  f.write(f"| {k} | {med[k]['nodes']:,.0f} | {med[k]['cpu']:.4f} | "
+                          f"{delta[k]:+.2f}% | {med[k]['nps']:,.0f} |\n")
+              f.write("\nIdentical search signatures guarantee only bench-tree equivalence; not full gameplay equivalence.\n")
+          PY
+      - name: Upload all samples
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cached-pawn-attacks-${{ matrix.compiler }}-${{ matrix.bonus }}
+          path: cached-pawn-bench.json
+          if-no-files-found: ignore
