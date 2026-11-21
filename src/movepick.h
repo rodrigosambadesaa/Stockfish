@@ -74,6 +74,7 @@ class MovePicker {
     Depth                        depth;
     int                          ply;
     bool                         skipQuiets = false;
+    bool                         sortCapturesOnDemand = false;
     ExtMove                      moves[MAX_MOVES];
 };
 
