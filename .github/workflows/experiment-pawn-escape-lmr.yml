@@ -1,0 +1,198 @@
+name: Pawn-threat escape LMR experiment
+
+on:
+  push:
+    branches:
+      - experiment/pawn-threat-escape-lmr-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: ${{ matrix.compiler }} LMR bonus ${{ matrix.bonus }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        bonus: [512, 1024]
+    env:
+      COMP: ${{ matrix.compiler }}
+      COMPCXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+      BONUS: ${{ matrix.bonus }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Checkout matching official Stockfish base
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Install reproducibility dependencies
+        if: matrix.compiler == 'gcc' && matrix.bonus == 512
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq expect
+      - name: Fetch official neural networks
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+      - name: Build both engines with identical compiler and -Werror
+        run: |
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C src -j2 ARCH=x86-64 build
+      - name: Record both search signatures (may differ for a genuine search change)
+        shell: bash
+        run: |
+          base="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          test="$(cd src && ../tests/signature.sh)"
+          echo "Reference bench signature: $base"
+          echo "Experiment bench signature: $test"
+          echo "Bonus: $BONUS"
+          {
+            echo "Reference signature: $base"
+            echo "Experiment signature: $test"
+            echo "LMR depth bonus: $BONUS"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Search reproducibility
+        if: matrix.compiler == 'gcc' && matrix.bonus == 512
+        run: cd src && ../tests/reprosearch.sh
+      - name: Perft, including Chess960
+        if: matrix.compiler == 'gcc' && matrix.bonus == 512
+        run: cd src && ../tests/perft.sh
+      - name: Interleaved bench measurements
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import resource
+          import statistics
+          import subprocess
+          import time
+          root = pathlib.Path.cwd()
+          engines = {
+              "official": (root / "../stockfish-reference/src").resolve(),
+              "experiment": (root / "src").resolve(),
+          }
+          readings = {name: [] for name in engines}
+          for round_idx in range(6):
+              names = list(engines)
+              if round_idx % 2:
+                  names.reverse()
+              for name in names:
+                  before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  started = time.perf_counter()
+                  p = subprocess.run(["./stockfish", "bench"], cwd=engines[name],
+                                     capture_output=True, text=True, timeout=180, check=True)
+                  elapsed = time.perf_counter() - started
+                  after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  output = p.stdout + "\n" + p.stderr
+                  nps = re.search(r"Nodes/second\s*:\s*(\d+)", output)
+                  nodes = re.search(r"Nodes searched\s*:\s*(\d+)", output)
+                  if not nps or not nodes:
+                      raise RuntimeError("Cannot extract NPS and node count")
+                  rec = {"nps": int(nps.group(1)), "nodes": int(nodes.group(1)),
+                         "wall_seconds": elapsed,
+                         "cpu_seconds": after.ru_utime + after.ru_stime -
+                                        before.ru_utime - before.ru_stime}
+                  readings[name].append(rec)
+                  print(f"round={round_idx+1} engine={name} {rec}", flush=True)
+          med = {name:{k:statistics.median(row[k] for row in data)
+                       for k in ("nps","nodes","wall_seconds","cpu_seconds")}
+                 for name,data in readings.items()}
+          result = {"compiler":os.environ["COMP"],"bonus":int(os.environ["BONUS"]),
+                    "medians":med,"samples":readings}
+          print("BENCH_RESULT=" + json.dumps(result,sort_keys=True),flush=True)
+          pathlib.Path("pawn-escape-bench.json").write_text(json.dumps(result,indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("\n| Engine | Median nodes | Median NPS | Median CPU seconds |\n"
+                      "|---|---:|---:|---:|\n")
+              for name in engines:
+                  m=med[name]
+                  f.write(f"| {name} | {m['nodes']:,.0f} | {m['nps']:,.0f} | "
+                          f"{m['cpu_seconds']:.3f} |\n")
+              f.write("\nThe number of nodes may differ; NPS alone cannot establish an Elo gain.\n")
+          PY
+      - name: Upload benchmark measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pawn-escape-bench-${{ matrix.compiler }}-${{ matrix.bonus }}
+          path: pawn-escape-bench.json
+          if-no-files-found: ignore
+
+  smoke-games:
+    name: Fastchess 192 games (LMR bonus ${{ matrix.bonus }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        bonus: [512, 1024]
+    env:
+      COMP: gcc
+      COMPCXX: g++
+      BONUS: ${{ matrix.bonus }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout pinned reference engine
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Checkout pinned Fastchess
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Disservin/fastchess
+          ref: 894616028492ae6114835195f14a899f6fa237d3
+          path: fastchess
+          persist-credentials: false
+      - name: Build reference and experimental engine
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C src -j2 ARCH=x86-64 build
+          make -C fastchess -j2
+      - name: Play 192 color-swapped rapid smoke games
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fastchess/fastchess \
+            -rounds 96 -games 2 -repeat -concurrency 2 \
+            -openings file=fastchess/app/tests/data/openings.epd format=epd order=random \
+            -srand 314159 \
+            -engine name=official cmd="$PWD/../stockfish-reference/src/stockfish" \
+            -engine name=pawn_escape cmd="$PWD/src/stockfish" \
+            -ratinginterval 48 -report penta=true \
+            -each proto=uci tc=1+0.01 \
+            -log file=escape-lmr${{ matrix.bonus }}.log \
+            | tee escape-lmr${{ matrix.bonus }}.txt
+          if grep -iE "Assertion|disconnect|Illegal move" \
+               escape-lmr${{ matrix.bonus }}.txt escape-lmr${{ matrix.bonus }}.log; then
+            echo "::error::Engine failure in match log"
+            exit 1
+          fi
+          {
+            echo "### LMR bonus $BONUS"
+            echo "192 short paired games: gross-regression screen only, not an Elo proof."
+            echo '~~~'
+            tail -22 escape-lmr${{ matrix.bonus }}.txt
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload match log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pawn-escape-games-${{ matrix.bonus }}
+          path: |
+            escape-lmr${{ matrix.bonus }}.txt
+            escape-lmr${{ matrix.bonus }}.log
+          if-no-files-found: ignore
