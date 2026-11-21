@@ -1,0 +1,198 @@
+name: Pawn escape LMR - AVX2 validation
+
+on:
+  push:
+    branches:
+      - validation/pawn-escape-lmr-avx2-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: AVX2 ${{ matrix.compiler }} bonus ${{ matrix.bonus }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        bonus: [512, 1024]
+    env:
+      COMP: ${{ matrix.compiler }}
+      COMPCXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+      BONUS: ${{ matrix.bonus }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check AVX2 support
+        run: grep -qw avx2 /proc/cpuinfo
+      - name: Checkout fixed base and first implementation
+        run: |
+          git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+          git worktree add --detach ../pawn-escape-original 5dfff0d2ec44c44e444c84e50f83cd7597c619f6
+      - name: Obtain networks
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+          make -C ../pawn-escape-original/src net
+      - name: Build all three AVX2 engines
+        run: |
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C ../pawn-escape-original/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C src -j2 ARCH=x86-64-avx2 build
+      - name: Ensure both experimental versions make exactly the same search decisions on bench
+        shell: bash
+        run: |
+          set -euo pipefail
+          b="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          o="$(cd ../pawn-escape-original/src && ../tests/signature.sh)"
+          n="$(cd src && ../tests/signature.sh)"
+          echo "AVX2 bench signatures: official=$b initial=$o bitboard=$n"
+          [[ "$o" == "$n" ]] || {
+            echo "::error::Optimizing pawn threat detection changed search behavior"
+            exit 1
+          }
+      - name: Ten interleaved rounds of NPS and CPU time
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import resource
+          import statistics
+          import subprocess
+          import time
+
+          root=pathlib.Path.cwd()
+          dirs={
+              "official":(root / "../stockfish-reference/src").resolve(),
+              "original":(root / "../pawn-escape-original/src").resolve(),
+              "bitboard":(root / "src").resolve(),
+          }
+          samples={k:[] for k in dirs}
+          for i in range(10):
+              order=list(dirs)
+              order=order[i%3:]+order[:i%3]
+              if i%2: order.reverse()
+              for name in order:
+                  b=resource.getrusage(resource.RUSAGE_CHILDREN)
+                  t=time.perf_counter()
+                  p=subprocess.run(["./stockfish","bench"],cwd=dirs[name],capture_output=True,
+                                   text=True,check=True,timeout=180)
+                  wall=time.perf_counter()-t
+                  a=resource.getrusage(resource.RUSAGE_CHILDREN)
+                  output=p.stderr+"\n"+p.stdout
+                  nps=re.search(r"Nodes/second\s*:\s*(\d+)",output)
+                  nodes=re.search(r"Nodes searched\s*:\s*(\d+)",output)
+                  if not nodes or not nps: raise RuntimeError("Unrecognized bench output")
+                  row={"nodes":int(nodes.group(1)),"nps":int(nps.group(1)),"wall":wall,
+                       "cpu":a.ru_utime+a.ru_stime-b.ru_utime-b.ru_stime}
+                  samples[name].append(row)
+                  print(f"round={i+1} engine={name} {row}",flush=True)
+          assert len({v["nodes"] for name in ("original","bitboard") for v in samples[name]})==1, "Experimental search mismatch"
+          med={k:{m:statistics.median(x[m] for x in rows) for m in ("nps","nodes","wall","cpu")}
+               for k,rows in samples.items()}
+          out={"compiler":os.environ["COMP"],"bonus":int(os.environ["BONUS"]),
+               "samples":samples,"medians":med,
+               "cpu_delta_vs_official_pct":
+                   {k:100*(v["cpu"]/med["official"]["cpu"]-1) for k,v in med.items()}}
+          print("AVX2_LMR_RESULT="+json.dumps(out,sort_keys=True),flush=True)
+          pathlib.Path("pawn-escape-avx2.json").write_text(json.dumps(out,indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as s:
+              s.write("### AVX2 results: CPU and speed, not Elo\n\n")
+              s.write("| Version | Bench nodes | Median NPS | Median CPU seconds | CPU vs base |\n"
+                      "|---|---:|---:|---:|---:|\n")
+              for k,v in med.items():
+                  s.write(f"| {k} | {v['nodes']:,.0f} | {v['nps']:,.0f} | {v['cpu']:.3f} | "
+                          f"{out['cpu_delta_vs_official_pct'][k]:+.2f}% |\n")
+              s.write("\nBench node counts differ by design; compare CPU time and match results, not NPS alone.\n")
+          PY
+      - name: Upload bench JSON
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pawn-escape-avx2-${{ matrix.compiler }}-${{ matrix.bonus }}
+          path: pawn-escape-avx2.json
+          if-no-files-found: ignore
+
+  games:
+    name: AVX2 256 paired games bonus ${{ matrix.bonus }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        bonus: [512, 1024]
+    env:
+      COMP: gcc
+      COMPCXX: g++
+      BONUS: ${{ matrix.bonus }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check AVX2 support
+        run: grep -qw avx2 /proc/cpuinfo
+      - name: Checkout official reference
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Checkout pinned fastchess
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Disservin/fastchess
+          ref: 894616028492ae6114835195f14a899f6fa237d3
+          path: fastchess
+          persist-credentials: false
+      - name: Build both AVX2 engines and harness
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_PAWN_ESCAPE_LMR_BONUS=$BONUS" \
+            make -C src -j2 ARCH=x86-64-avx2 build
+          make -C fastchess -j2
+      - name: Play 256 games with paired openings and swapped colors
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fastchess/fastchess \
+            -rounds 128 -games 2 -repeat -concurrency 2 \
+            -openings file=fastchess/app/tests/data/openings.epd format=epd order=random \
+            -srand 271828 \
+            -engine name=official cmd="$PWD/../stockfish-reference/src/stockfish" \
+            -engine name=pawn_escape cmd="$PWD/src/stockfish" \
+            -ratinginterval 64 -report penta=true \
+            -each proto=uci tc=2+0.02 \
+            -log file=avx2-lmr-${{ matrix.bonus }}.log \
+            | tee avx2-lmr-${{ matrix.bonus }}.txt
+          if grep -iE "Assertion|disconnect|Illegal move" \
+               avx2-lmr-${{ matrix.bonus }}.log avx2-lmr-${{ matrix.bonus }}.txt; then
+            echo "::error::Engine failure or illegal move"
+            exit 1
+          fi
+          {
+            echo "### AVX2 256 color-swapped games, LMR bonus $BONUS"
+            echo "Small screening sample, not conclusive Elo evidence."
+            echo '~~~'
+            tail -25 avx2-lmr-${{ matrix.bonus }}.txt
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload match logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pawn-escape-avx2-games-${{ matrix.bonus }}
+          path: |
+            avx2-lmr-${{ matrix.bonus }}.txt
+            avx2-lmr-${{ matrix.bonus }}.log
+          if-no-files-found: ignore
