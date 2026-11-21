@@ -1,0 +1,72 @@
+name: Lazy capture ordering - paired smoke games
+
+on:
+  push:
+    branches:
+      - experiment/lazy-main-captures-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paired-games:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      COMP: gcc
+      COMPCXX: g++
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Checkout pinned baseline
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Checkout fastchess harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Disservin/fastchess
+          ref: 894616028492ae6114835195f14a899f6fa237d3
+          path: fastchess
+          persist-credentials: false
+      - name: Build both engines and game harness
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+          make -C src -j2 ARCH=x86-64 build
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+          make -C fastchess -j2
+      - name: Run 96 color-swapped smoke games
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fastchess/fastchess \
+            -rounds 48 -games 2 -repeat -concurrency 2 \
+            -openings file=fastchess/app/tests/data/openings.epd format=epd order=random \
+            -srand 314159 \
+            -engine name=baseline cmd="$PWD/../stockfish-reference/src/stockfish" \
+            -engine name=experiment cmd="$PWD/src/stockfish" \
+            -ratinginterval 24 -report penta=true \
+            -each proto=uci tc=1+0.01 \
+            -log file=fastchess-lazy-captures.log | tee fastchess-lazy-captures.txt
+          if grep -iE "Assertion|disconnect|Illegal move" fastchess-lazy-captures.log fastchess-lazy-captures.txt; then
+            echo "::error::Game harness reported a problem."
+            exit 1
+          fi
+          {
+            echo '### 96 paired smoke games (1+0.01)'
+            echo 'This small test is a bug / gross-regression screen, not an Elo proof.'
+            echo '```'
+            tail -35 fastchess-lazy-captures.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload engine match logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lazy-capture-smoke-games
+          path: |
+            fastchess-lazy-captures.log
+            fastchess-lazy-captures.txt
+          if-no-files-found: ignore
