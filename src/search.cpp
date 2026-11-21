@@ -49,6 +49,14 @@
 #include "uci.h"
 #include "ucioption.h"
 
+// Experimental LMR depth protection for quiet non-pawn moves that leave a pawn attack.
+// Test variants can set -DSF_PAWN_ESCAPE_LMR_BONUS=<value> when compiling.
+#ifndef SF_PAWN_ESCAPE_LMR_BONUS
+    #define SF_PAWN_ESCAPE_LMR_BONUS 512
+#endif
+static_assert(SF_PAWN_ESCAPE_LMR_BONUS >= 0 && SF_PAWN_ESCAPE_LMR_BONUS <= 2048,
+              "SF_PAWN_ESCAPE_LMR_BONUS must be between 0 and 2048");
+
 namespace Stockfish {
 
 inline int lmr_divisor(int depth) {
@@ -1331,6 +1339,20 @@ moves_loop:  // When in check, search starts here
                 extension = -3;
         }
 
+        // Detect quiet escapes from enemy pawn attacks in the parent's position.
+        // Avoid Position::threats_by(PAWN) here: on early TT moves the cache may be
+        // empty and filling it computes *all* piece threat maps, not just pawns.
+        bool escapesPawnThreat = false;
+        if (!capture && !givesCheck && depth >= 3 && moveCount > 1
+            && type_of(movedPiece) != PAWN && type_of(movedPiece) != KING)
+        {
+            const Bitboard pawnThreats = us == WHITE
+                                        ? pawn_attacks_bb<BLACK>(pos.pieces(BLACK, PAWN))
+                                        : pawn_attacks_bb<WHITE>(pos.pieces(WHITE, PAWN));
+            escapesPawnThreat = (pawnThreats & move.from_sq())
+                             && !(pawnThreats & move.to_sq());
+        }
+
         u64 nodeCount = rootNode ? u64(nodes) : 0;
 
         // Step 17. Make the move
@@ -1379,6 +1401,10 @@ moves_loop:  // When in check, search starts here
 
         // Decrease/increase reduction for moves with a good/bad history
         r -= ss->statScore * 439 / 4096;
+
+        // Give quiet moves escaping an enemy pawn attack a little more depth
+        // before LMR can discard a potentially important defensive resource.
+        r -= SF_PAWN_ESCAPE_LMR_BONUS * escapesPawnThreat;
 
         if (!capture && !is_decisive(alpha))
             r += 3 * std::clamp(alpha - eval, -64, 96);
