@@ -1,0 +1,211 @@
+name: Hybrid capture ordering - threshold comparison
+
+on:
+  push:
+    branches:
+      - experiment/hybrid-capture-ordering-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Bench ${{ matrix.compiler }} / threshold ${{ matrix.threshold }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        threshold: [4, 8, 12]
+    env:
+      COMP: ${{ matrix.compiler }}
+      COMPCXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+      THRESHOLD: ${{ matrix.threshold }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Checkout pinned official and old lazy candidate
+        run: |
+          git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+          git worktree add --detach ../stockfish-lazy fcb7e75a37e46827d075debf25e5b7852eaa5513
+      - name: Download networks
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+          make -C ../stockfish-lazy/src net
+      - name: Build three engines with identical compilers
+        run: |
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+          make -C ../stockfish-lazy/src -j2 ARCH=x86-64 build
+          CXXFLAGS="-Werror -DSF_LAZY_CAPTURE_THRESHOLD=$THRESHOLD" \
+            make -C src -j2 ARCH=x86-64 build
+      - name: Check identical search signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          b="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          l="$(cd ../stockfish-lazy/src && ../tests/signature.sh)"
+          h="$(cd src && ../tests/signature.sh)"
+          printf 'Signatures: official=%s lazy=%s hybrid=%s threshold=%s\n' "$b" "$l" "$h" "$THRESHOLD"
+          echo "Signatures: official=$b lazy=$l hybrid=$h threshold=$THRESHOLD" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$b" == "$l" && "$b" == "$h" ]] || {
+            echo "::error::Search signature changed"
+            exit 1
+          }
+      - name: Search reproducibility
+        if: matrix.compiler == 'gcc' && matrix.threshold == 8
+        run: cd src && ../tests/reprosearch.sh
+      - name: Perft including Chess960
+        if: matrix.compiler == 'gcc' && matrix.threshold == 8
+        run: cd src && ../tests/perft.sh
+      - name: Interleaved NPS and CPU comparison (six rounds)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import resource
+          import statistics
+          import subprocess
+          import time
+
+          root = pathlib.Path.cwd()
+          engines = {
+              "official": (root / "../stockfish-reference/src").resolve(),
+              "lazy": (root / "../stockfish-lazy/src").resolve(),
+              "hybrid": (root / "src").resolve(),
+          }
+          samples = {name: [] for name in engines}
+          for i in range(6):
+              names = list(engines)
+              names = names[i % 3:] + names[:i % 3]
+              if i % 2:
+                  names.reverse()
+              for name in names:
+                  before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  t0 = time.perf_counter()
+                  p = subprocess.run(["./stockfish", "bench"], cwd=engines[name],
+                                     capture_output=True, text=True, timeout=180, check=True)
+                  wall = time.perf_counter() - t0
+                  after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  out = p.stderr + "\n" + p.stdout
+                  nps = re.search(r"Nodes/second\s*:\s*(\d+)", out)
+                  nodes = re.search(r"Nodes searched\s*:\s*(\d+)", out)
+                  if not nps or not nodes:
+                      raise RuntimeError("Could not parse bench throughput")
+                  rec = {"nps": int(nps.group(1)), "nodes": int(nodes.group(1)),
+                         "wall_seconds": wall,
+                         "child_cpu_seconds": after.ru_utime + after.ru_stime
+                                                - before.ru_utime - before.ru_stime}
+                  samples[name].append(rec)
+                  print(f"round={i+1} engine={name} nps={rec['nps']} "
+                        f"nodes={rec['nodes']} wall={wall:.3f}s cpu={rec['child_cpu_seconds']:.3f}s",
+                        flush=True)
+
+          if len({x["nodes"] for seq in samples.values() for x in seq}) != 1:
+              raise AssertionError("Bench nodes differ from the official baseline")
+          medians = {name: {metric: statistics.median(x[metric] for x in seq)
+                            for metric in ("nps", "wall_seconds", "child_cpu_seconds")}
+                     for name, seq in samples.items()}
+          base = medians["official"]["nps"]
+          ratios = {name: (medians[name]["nps"] / base - 1) * 100 for name in engines}
+          print("MEDIANS=" + json.dumps({"medians": medians, "nps_delta_percent": ratios},
+                                        sort_keys=True), flush=True)
+          payload = {"compiler": os.environ["COMP"], "threshold": int(os.environ["THRESHOLD"]),
+                     "samples": samples, "medians": medians, "nps_delta_percent": ratios}
+          filename = f"hybrid-benchmark-{os.environ['COMP']}-t{os.environ['THRESHOLD']}.json"
+          pathlib.Path(filename).write_text(json.dumps(payload, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n| Engine | Median NPS | NPS vs official | Median CPU seconds | Median wall seconds |\n"
+                            "|---|---:|---:|---:|---:|\n")
+              for name in engines:
+                  m = medians[name]
+                  summary.write(f"| {name} | {m['nps']:,.0f} | {ratios[name]:+.2f}% | "
+                                f"{m['child_cpu_seconds']:.3f} | {m['wall_seconds']:.3f} |\n")
+              summary.write("\nSix samples are a screening measurement, not proof of Elo gain.\n")
+          PY
+      - name: Upload benchmark data
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hybrid-benchmark-${{ matrix.compiler }}-t${{ matrix.threshold }}
+          path: hybrid-benchmark-*.json
+          if-no-files-found: ignore
+
+  games:
+    name: Fastchess smoke (threshold ${{ matrix.threshold }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        threshold: [4, 8, 12]
+    env:
+      COMP: gcc
+      COMPCXX: g++
+      THRESHOLD: ${{ matrix.threshold }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Checkout pinned original
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Checkout pinned Fastchess
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Disservin/fastchess
+          ref: 894616028492ae6114835195f14a899f6fa237d3
+          path: fastchess
+          persist-credentials: false
+      - name: Build engines and harness
+        run: |
+          make -C ../stockfish-reference/src net
+          make -C src net
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+          CXXFLAGS="-Werror -DSF_LAZY_CAPTURE_THRESHOLD=$THRESHOLD" \
+            make -C src -j2 ARCH=x86-64 build
+          make -C fastchess -j2
+      - name: Play 96 paired-color games
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./fastchess/fastchess \
+            -rounds 48 -games 2 -repeat -concurrency 2 \
+            -openings file=fastchess/app/tests/data/openings.epd format=epd order=random \
+            -srand 314159 \
+            -engine name=official cmd="$PWD/../stockfish-reference/src/stockfish" \
+            -engine name=hybrid cmd="$PWD/src/stockfish" \
+            -ratinginterval 24 -report penta=true \
+            -each proto=uci tc=1+0.01 \
+            -log file=hybrid-games-t${{ matrix.threshold }}.log \
+            | tee hybrid-games-t${{ matrix.threshold }}.txt
+          if grep -iE "Assertion|disconnect|Illegal move" \
+              hybrid-games-t${{ matrix.threshold }}.log hybrid-games-t${{ matrix.threshold }}.txt; then
+            echo "::error::Game harness reported an engine problem"
+            exit 1
+          fi
+          {
+            echo "### Threshold $THRESHOLD: 96 color-swapped smoke games"
+            echo "Not a statistically conclusive Elo test."
+            echo '~~~'
+            tail -18 hybrid-games-t${{ matrix.threshold }}.txt
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload match logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hybrid-games-t${{ matrix.threshold }}
+          path: |
+            hybrid-games-t${{ matrix.threshold }}.txt
+            hybrid-games-t${{ matrix.threshold }}.log
+          if-no-files-found: ignore
