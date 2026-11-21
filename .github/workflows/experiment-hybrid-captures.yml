@@ -57,6 +57,9 @@ jobs:
             echo "::error::Search signature changed"
             exit 1
           }
+      - name: Install expect for reproducibility test
+        if: matrix.compiler == 'gcc' && matrix.threshold == 8
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq expect
       - name: Search reproducibility
         if: matrix.compiler == 'gcc' && matrix.threshold == 8
         run: cd src && ../tests/reprosearch.sh
