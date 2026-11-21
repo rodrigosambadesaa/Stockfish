@@ -55,7 +55,7 @@ class MovePicker {
     void skip_quiet_moves();
 
    private:
-    template<typename Pred>
+    template<bool SortOnDemand = false, typename Pred>
     Move select(Pred);
     template<GenType T>
     ExtMove* generate_and_score();
