@@ -1158,6 +1158,12 @@ moves_loop:  // When in check, search starts here
 
     int moveCount = 0;
 
+    // A pawn attack map does not change while the move picker searches this
+    // position. Compute it only if a qualifying quiet move needs it, then
+    // reuse it for the rest of the node.
+    Bitboard pawnThreats = 0;
+    bool     pawnThreatsInitialized = false;
+
     // Step 14. Loop through all legal moves until no moves remain
     // or a beta cutoff occurs.
     while ((move = mp.next_move()) != Move::none())
@@ -1346,9 +1352,12 @@ moves_loop:  // When in check, search starts here
         if (!capture && !givesCheck && depth >= 3 && moveCount > 1
             && type_of(movedPiece) != PAWN && type_of(movedPiece) != KING)
         {
-            const Bitboard pawnThreats = us == WHITE
-                                        ? pawn_attacks_bb<BLACK>(pos.pieces(BLACK, PAWN))
-                                        : pawn_attacks_bb<WHITE>(pos.pieces(WHITE, PAWN));
+            if (!pawnThreatsInitialized)
+            {
+                pawnThreats = us == WHITE ? pawn_attacks_bb<BLACK>(pos.pieces(BLACK, PAWN))
+                                         : pawn_attacks_bb<WHITE>(pos.pieces(WHITE, PAWN));
+                pawnThreatsInitialized = true;
+            }
             escapesPawnThreat = (pawnThreats & move.from_sq())
                              && !(pawnThreats & move.to_sq());
         }
