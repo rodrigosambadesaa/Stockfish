@@ -1,0 +1,102 @@
+name: Lazy capture ordering experiment
+
+on:
+  push:
+    branches:
+      - experiment/lazy-main-captures-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression-and-speed:
+    name: ${{ matrix.compiler }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: GCC
+            comp: gcc
+            cxx: g++
+          - compiler: Clang
+            comp: clang
+            cxx: clang++
+    env:
+      COMP: ${{ matrix.comp }}
+      COMPCXX: ${{ matrix.cxx }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install runtime test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: Check out fixed upstream reference in a separate worktree
+        run: git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+      - name: Fetch neural networks in both worktrees
+        run: |
+          make -C src net
+          make -C ../stockfish-reference/src net
+      - name: Build experimental engine
+        run: make -C src -j2 ARCH=x86-64 build
+      - name: Build fixed reference engine
+        run: make -C ../stockfish-reference/src -j2 ARCH=x86-64 build
+      - name: Check bench signatures are identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SIG="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          TEST_SIG="$(cd src && ../tests/signature.sh)"
+          echo "Baseline bench: $BASE_SIG"
+          echo "Experimental bench: $TEST_SIG"
+          echo "Baseline bench: $BASE_SIG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Experimental bench: $TEST_SIG" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$BASE_SIG" != "$TEST_SIG" ]]; then
+            echo "::error::Search signature changed despite stable ordering hypothesis"
+            exit 1
+          fi
+      - name: Reproducibility
+        run: cd src && ../tests/reprosearch.sh
+      - name: Legal move generation (including Chess960)
+        if: matrix.comp == 'gcc'
+        run: cd src && ../tests/perft.sh
+      - name: Interleaved NPS benchmark (5 paired rounds)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import statistics
+          import subprocess
+          root = pathlib.Path.cwd()
+          dirs = {"base": (root / "../stockfish-reference/src").resolve(), "test": (root / "src").resolve()}
+          scores = {"base": [], "test": []}
+          nodes = {"base": [], "test": []}
+          for i in range(5):
+              order = ["base", "test"] if i % 2 == 0 else ["test", "base"]
+              for name in order:
+                  cp = subprocess.run(["./stockfish", "bench"], cwd=dirs[name],
+                                      capture_output=True, text=True, check=True, timeout=180)
+                  combined = cp.stdout + "\n" + cp.stderr
+                  nps_match = re.search(r"Nodes/second\s*:\s*(\d+)", combined)
+                  nodes_match = re.search(r"Nodes searched\s*:\s*(\d+)", combined)
+                  if not nps_match or not nodes_match:
+                      raise RuntimeError("Unable to parse Stockfish bench throughput")
+                  nps, count = int(nps_match.group(1)), int(nodes_match.group(1))
+                  scores[name].append(nps)
+                  nodes[name].append(count)
+                  print(f"round={i+1} {name} nps={nps} nodes={count}", flush=True)
+          assert len(set(nodes["base"] + nodes["test"])) == 1, "Bench nodes diverged"
+          b, t = (statistics.median(scores[name]) for name in ("base", "test"))
+          ratio = 100 * (t / b - 1)
+          print(f"Baseline median NPS: {b:.0f}")
+          print(f"Experimental median NPS: {t:.0f}")
+          print(f"Experimental NPS change: {ratio:+.2f}%")
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(f"\n| Metric | Value |\n|---|---:|\n| Median reference NPS | {b:,.0f} |\n| Median experimental NPS | {t:,.0f} |\n| NPS delta (experiment vs reference) | {ratio:+.2f}% |\n")
+              out.write("\nInterleaved samples are a screening measurement, not proof of Elo gain.\n")
+          PY
