@@ -20,6 +20,7 @@
 
 #include <cassert>
 #include <limits>
+#include <utility>
 
 #include "bitboard.h"
 #include "misc.h"
@@ -271,12 +272,32 @@ ExtMove* MovePicker::generate_and_score() {
 
 // Returns the next move satisfying a predicate function.
 // This never returns the TT move, as it was emitted before.
-template<typename Pred>
+template<bool SortOnDemand, typename Pred>
 Move MovePicker::select(Pred filter) {
 
     for (; cur < endCur; ++cur)
+    {
+        if constexpr (SortOnDemand)
+        {
+            // Extract only the next best capture instead of sorting every capture up front.
+            // Stable extraction retains the original tie order and search decisions.
+            ExtMove* best = cur;
+            for (ExtMove* p = cur + 1; p < endCur; ++p)
+                if (*best < *p)
+                    best = p;
+
+            if (best != cur)
+            {
+                ExtMove move = *best;
+                for (ExtMove* p = best; p != cur; --p)
+                    *p = *(p - 1);
+                *cur = move;
+            }
+        }
+
         if (*cur != ttMove && filter())
             return *cur++;
+    }
 
     return Move::none();
 }
@@ -303,13 +324,17 @@ dispatch:
         else
             endCur = generate_and_score<CAPTURES>();
 
-        partial_insertion_sort(cur, endCur, std::numeric_limits<int>::min());
+        // Main-search captures are ordered lazily, so cutoffs need not pay
+        // the cost of sorting captures which will never be visited.
+        // Preserve eager sorting for qsearch, evasions and ProbCut.
+        if (first_stage != GOOD_CAPTURE)
+            partial_insertion_sort(cur, endCur, std::numeric_limits<int>::min());
 
         stage = first_stage;
         goto dispatch;
 
     case GOOD_CAPTURE :
-        if (Move move = select([&]() {
+        if (Move move = select<true>([&]() {
                 if (pos.see_ge(*cur, -cur->value / 18))
                     return true;
                 *endBadMoves++ = *cur;
