@@ -26,6 +26,15 @@
 #include "misc.h"
 #include "position.h"
 
+// Experimental, compile-time-tunable threshold. Main-search capture lists
+// at or below this size use the original eager insertion sort. Larger lists
+// select the next highest-scoring capture only when it is requested.
+#ifndef SF_LAZY_CAPTURE_THRESHOLD
+    #define SF_LAZY_CAPTURE_THRESHOLD 8
+#endif
+static_assert(SF_LAZY_CAPTURE_THRESHOLD >= 0 && SF_LAZY_CAPTURE_THRESHOLD <= 256,
+              "SF_LAZY_CAPTURE_THRESHOLD must be in [0, 256]");
+
 namespace Stockfish {
 
 enum Stages : i8 {
@@ -324,23 +333,32 @@ dispatch:
         else
             endCur = generate_and_score<CAPTURES>();
 
-        // Main-search captures are ordered lazily, so cutoffs need not pay
-        // the cost of sorting captures which will never be visited.
-        // Preserve eager sorting for qsearch, evasions and ProbCut.
-        if (first_stage != GOOD_CAPTURE)
+        // Use the original eager sort for short lists and for every search
+        // stage except main-search captures. Only long main-search lists
+        // try lazy selection to avoid sorting entries after an early cutoff.
+        sortCapturesOnDemand =
+          first_stage == GOOD_CAPTURE && endCur - cur > SF_LAZY_CAPTURE_THRESHOLD;
+
+        if (!sortCapturesOnDemand)
             partial_insertion_sort(cur, endCur, std::numeric_limits<int>::min());
 
         stage = first_stage;
         goto dispatch;
 
     case GOOD_CAPTURE :
-        if (Move move = select<true>([&]() {
-                if (pos.see_ge(*cur, -cur->value / 18))
-                    return true;
-                *endBadMoves++ = *cur;
-                return false;
-            }))
+    {
+        auto isGoodCapture = [&]() {
+            if (pos.see_ge(*cur, -cur->value / 18))
+                return true;
+            *endBadMoves++ = *cur;
+            return false;
+        };
+
+        // Never reselect a short list that was already insertion-sorted.
+        if (Move move = sortCapturesOnDemand ? select<true>(isGoodCapture)
+                                             : select<false>(isGoodCapture))
             return move;
+    }
 
         endBadCaptures = endBadMoves;
 
