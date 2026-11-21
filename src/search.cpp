@@ -1339,15 +1339,19 @@ moves_loop:  // When in check, search starts here
                 extension = -3;
         }
 
-        // Escape from a pawn attack: a quiet piece retreat or relocation may deserve
-        // a less reduced search, even when its statistical move history is weak.
-        // Detect this in the parent's position, before do_move() flips the side to move.
-        // The pawn-threat map is cached by Position and also used in quiet move scoring.
-        const bool escapesPawnThreat =
-          !capture && !givesCheck && depth >= 3 && moveCount > 1
-          && type_of(movedPiece) != PAWN && type_of(movedPiece) != KING
-          && (pos.threats_by(PAWN) & move.from_sq())
-          && !(pos.threats_by(PAWN) & move.to_sq());
+        // Detect quiet escapes from enemy pawn attacks in the parent's position.
+        // Avoid Position::threats_by(PAWN) here: on early TT moves the cache may be
+        // empty and filling it computes *all* piece threat maps, not just pawns.
+        bool escapesPawnThreat = false;
+        if (!capture && !givesCheck && depth >= 3 && moveCount > 1
+            && type_of(movedPiece) != PAWN && type_of(movedPiece) != KING)
+        {
+            const Bitboard pawnThreats = us == WHITE
+                                        ? pawn_attacks_bb<BLACK>(pos.pieces(BLACK, PAWN))
+                                        : pawn_attacks_bb<WHITE>(pos.pieces(WHITE, PAWN));
+            escapesPawnThreat = (pawnThreats & move.from_sq())
+                             && !(pawnThreats & move.to_sq());
+        }
 
         u64 nodeCount = rootNode ? u64(nodes) : 0;
 
