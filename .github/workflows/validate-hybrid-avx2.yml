@@ -1,0 +1,121 @@
+name: Hybrid captures - AVX2 throughput validation
+
+on:
+  push:
+    branches:
+      - validation/hybrid-captures-avx2-2026-11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  avx2:
+    name: AVX2 comparison / ${{ matrix.compiler }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      COMP: ${{ matrix.compiler }}
+      COMPCXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+      CXXFLAGS: -Werror
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify runner supports AVX2
+        run: grep -qw avx2 /proc/cpuinfo
+      - name: Worktrees for pinned official and threshold-8 variant
+        run: |
+          git worktree add --detach ../stockfish-reference 1c6f497afc176044b2feca9ce74a7bdce9e7e0cb
+          git worktree add --detach ../hybrid-t8 2e01281ff59771da6e6899d2f445d53a053ba469
+      - name: Fetch networks
+        run: |
+          make -C src net
+          make -C ../hybrid-t8/src net
+          make -C ../stockfish-reference/src net
+      - name: Build pinned official and hybrid thresholds 4 and 8
+        run: |
+          make -C ../stockfish-reference/src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_LAZY_CAPTURE_THRESHOLD=4" make -C src -j2 ARCH=x86-64-avx2 build
+          CXXFLAGS="-Werror -DSF_LAZY_CAPTURE_THRESHOLD=8" make -C ../hybrid-t8/src -j2 ARCH=x86-64-avx2 build
+      - name: Compare bench signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(cd ../stockfish-reference/src && ../tests/signature.sh)"
+          four="$(cd src && ../tests/signature.sh)"
+          eight="$(cd ../hybrid-t8/src && ../tests/signature.sh)"
+          echo "Bench signatures: official=$base four=$four eight=$eight"
+          [[ "$base" == "$four" && "$base" == "$eight" ]] || exit 1
+      - name: Interleaved benchmark - 8 rounds
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import resource
+          import statistics
+          import subprocess
+          import time
+          root = pathlib.Path.cwd()
+          engines = {
+              "official": (root / "../stockfish-reference/src").resolve(),
+              "hybrid_t4": (root / "src").resolve(),
+              "hybrid_t8": (root / "../hybrid-t8/src").resolve(),
+          }
+          samples = {k: [] for k in engines}
+          for i in range(8):
+              names = list(engines)
+              names = names[i % 3:] + names[:i % 3]
+              if i % 2:
+                  names.reverse()
+              for name in names:
+                  before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  t0 = time.perf_counter()
+                  p = subprocess.run(["./stockfish", "bench"], cwd=engines[name],
+                                     capture_output=True, text=True, check=True, timeout=180)
+                  wall = time.perf_counter() - t0
+                  after = resource.getrusage(resource.RUSAGE_CHILDREN)
+                  output = p.stdout + "\n" + p.stderr
+                  nps = re.search(r"Nodes/second\s*:\s*(\d+)", output)
+                  nodes = re.search(r"Nodes searched\s*:\s*(\d+)", output)
+                  if not nps or not nodes:
+                      raise ValueError("Unexpected bench output")
+                  record = {"nps": int(nps.group(1)), "nodes": int(nodes.group(1)),
+                            "wall": wall, "cpu": after.ru_utime + after.ru_stime
+                                             - before.ru_utime - before.ru_stime}
+                  samples[name].append(record)
+                  print(f"round={i+1} {name} {record}", flush=True)
+          if len({rec["nodes"] for rs in samples.values() for rec in rs}) != 1:
+              raise AssertionError("Search signature diverges between engines")
+          med = {k: {field: statistics.median(x[field] for x in vals)
+                     for field in ("nps","cpu","wall")} for k, vals in samples.items()}
+          delta = {k: 100.0 * (med[k]["nps"] / med["official"]["nps"] - 1)
+                   for k in engines}
+          print("AVX2_RESULT=" + json.dumps({"medians":med,"nps_delta_percent":delta},
+                                            sort_keys=True), flush=True)
+          pathlib.Path("avx2-results.json").write_text(json.dumps({
+              "compiler":os.environ["COMP"],"samples":samples,"medians":med,
+              "nps_delta_percent":delta}, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("| Engine | Median NPS | NPS vs official | Median CPU seconds |\n"
+                      "|---|---:|---:|---:|\n")
+              for k in engines:
+                  f.write(f"| {k} | {med[k]['nps']:,.0f} | {delta[k]:+.2f}% | "
+                          f"{med[k]['cpu']:.3f} |\n")
+              f.write("\nAVX2 throughput on shared CI hardware is not an Elo estimate.\n")
+          PY
+      - name: Upload reproducible performance records
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hybrid-avx2-${{ matrix.compiler }}
+          path: avx2-results.json
+          if-no-files-found: ignore
